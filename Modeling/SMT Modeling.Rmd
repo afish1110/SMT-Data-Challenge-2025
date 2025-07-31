@@ -1,0 +1,362 @@
+---
+title: "SMT Model Creation"
+author: "Andrew Fish"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Packages
+```{r}
+##gotta have it
+library(tidyverse)
+
+##read/write csv
+library(readr)
+
+##visualization
+library(ggplot2)
+library(ggpubr)
+library(gt)
+library(gtExtras)
+library(ggthemes)
+library(webshot2)
+
+##modeling
+library(caret)
+library(caTools)
+library(performance) ##Thanks Billy for showing me this one
+library(e1071)
+##decision trees
+library(rpart)
+library(rpart.plot)
+##xgboost
+library(xgboost)
+##Random Forest
+library(randomForest)
+
+library(kernelshap)
+library(shapviz)
+```
+
+```{r}
+##reading in the modeling data done in our data wrangling rmd
+clean_data <- read_csv('SMT_modeling_data.csv')
+model_data <- clean_data %>%  
+  select(safe, ##what we want to predict
+         speed_percentile_player_runner, dist_next_base_at_deflect_runner, ##runner variables
+         ##thrower variables
+         speed_percentile_player_thrower, throw_speed_percentile_thrower, dist_next_base_at_deflect_thrower, max_ball_dist_thrower)
+```
+
+```{r}
+set.seed(42) ##Jackie Robinson
+
+##length of data frame
+n <- nrow(model_data)
+
+##train/test proportion
+prop <- 0.75
+
+##acquire indices of the rows we want to use to train
+train <- sample(n, size = n * prop)
+
+##split into train and test data
+data_train <- model_data[train, ]
+data_test <- model_data[-train, ]
+```
+
+
+First starting with a logistic model
+
+```{r}
+logistic_model <- glm(safe ~ .,
+                      data = data_train,
+                      family = 'binomial')
+
+##looking at the significance of variables
+summary(logistic_model) ##dist_next_base_at_deflect_runner at 0.1%, max_ball_dist_thrower at 1%, speed_percentile_player_runner at 5%
+
+##checks for multicollinearity and autocorrelation
+check_collinearity(logistic_model) ##Low for all, don't need to make any changes
+check_autocorrelation(logistic_model) ##p = 0.620 independent residuals, don't need to make any changes
+
+##accuracy and performance of model
+performance_accuracy(logistic_model) ##70.83%
+model_performance(logistic_model) ##log_loss = 0.618
+
+##predicts chance of being safe based on the logistic model
+predict.logistic <- predict(logistic_model,
+                            data_test,
+                            type = 'response')
+
+##combines the predicted chances with the model data
+data.logistic <- bind_cols(data_test, predictions = predict.logistic)
+```
+
+
+Naive Bayes
+
+```{r}
+set.seed(34) ##David Ortiz
+
+##need to rerun this to be in the new set.seed() randomization
+##acquire indices of the rows we want to use to train
+train <- sample(n, size = n * prop)
+
+##split into train and test data
+data_train <- model_data[train, ]
+data_test <- model_data[-train, ]
+
+classifier_safe <- naiveBayes(safe ~., data = data_train)
+classifier_safe
+
+##predicting on test data
+predict.bayes <- predict(classifier_safe, newdata = data_test)
+
+cm_bayes <- table(data_test$safe, predict.bayes)
+cm_bayes
+cm_bayes %>% prop.table()
+
+confusionMatrix(cm_bayes) ##accuracy 67.16% slightly less than logistitc model as well harder to interpret so not going to be using this model
+```
+
+
+Decision Trees
+
+```{r}
+set.seed(2018) ##Last Red Sox WS title
+
+##need to rerun this to be in the new set.seed() randomization
+##acquire indices of the rows we want to use to train
+train <- sample(n, size = n * prop)
+
+##split into train and test data
+data_train <- model_data[train, ]
+data_test <- model_data[-train, ]
+
+tree_safe <- rpart(safe ~ .,
+                   data = data_train,
+                   method = 'class')
+##visualization the entire tree too big to see criteria
+rpart.plot(tree_safe)
+
+predict.dec_tree <- predict(tree_safe, data_test, type = 'class')
+
+cm_dec_tree <- table(data_test$safe, predict.dec_tree)
+cm_dec_tree
+cm_dec_tree %>% prop.table()
+
+confusionMatrix(cm_dec_tree) ##accuracy 68.66% less than logistic and Naive Bayes and harder to explain so won't use
+```
+
+Random Forest
+
+```{r}
+set.seed(50) ##Mookie Betts 
+
+##need to rerun this to be in the new set.seed() randomization
+##acquire indices of the rows we want to use to train
+train <- sample(n, size = n * prop)
+
+##split into train and test data using factor response data
+data_train <- model_data[train, ]
+data_test <- model_data[-train, ]
+
+##random Forest model found using ntree = 500 optimized the accuracy, Mcnemr's p-value, and Kappa
+safe_rf <- randomForest(safe ~.,
+                 data = data_train,
+                 ntree = 500,
+                 importance = TRUE,
+                 proximity = TRUE)
+safe_rf
+
+predict.rf <- predict(safe_rf, data_test)
+
+##getting model accuracy manually
+outcomes <- bind_cols(data_test$safe, predict.rf)
+names(outcomes) <- c('actual', 'expected_prob')
+outcomes <- outcomes %>%
+  ##reassigning factor characteristic for comparing
+  mutate(expected_outcome = case_when(expected_prob >= 0.5 ~ 1,
+                                      TRUE ~ 0))
+sum(outcomes$actual == outcomes$expected_outcome) / nrow(outcomes) ##72.39%
+```
+
+
+```{r}
+##new to SHAP and visualizations needs to change start with RF model so help using https://stackoverflow.com/questions/78037608/bee-swarm-plot-with-shap-values-for-random-forest
+
+##variable names
+xvars <- setdiff(colnames(data_train), 'safe')
+
+##calculating shap_values
+shap_values <- permshap(safe_rf, X = data_train, bg_X = data_train, feature_names = xvars)
+
+##changing to shapviz
+shap_values <- shapviz(shap_values)
+```
+
+```{r}
+##shap importance plot beeswarm
+sv_importance(shap_values, kind = 'bee') +
+  ##chart title
+  labs(title = 'Random Forest SHAP Plot') +
+  ##changes the y variable labels
+  scale_y_discrete(labels = c('Throw Speed', 'Baserunner Sprint Speed', 'Fielder Sprint Speed',
+                              'Baserunner Distance to Base at Deflection', 'Fielder Distance to Base at Deflection',
+                              'Max Distance between Thrower and Ball'))
+
+ggsave('RFShapPlot.png')
+```
+
+
+xgBoost
+
+```{r}
+##new to xgBoost so looked up a tutorial and adjusting that code from https://www.statology.org/xgboost-in-r/
+
+set.seed(15) ##Dustin Pedroia 
+
+##need to rerun this to be in the new set.seed() randomization
+##acquire indices of the rows we want to use to train
+train <- sample(n, size = n * prop)
+
+##split into train and test data using factor response data
+data_train <- model_data[train, ]
+data_test <- model_data[-train, ]
+
+##defining predictor and response variables within training and testing sets
+data_train_x <- data.matrix(data_train[ , -1])
+data_train_y <- data.matrix(data_train[ , 1])
+
+data_test_x <- data.matrix(data_test[ , -1])
+data_test_y <- data.matrix(data_test[ , 1])
+
+##final train and test sets
+xgb_train <- xgb.DMatrix(data = data_train_x, label = data_train_y)
+xgb_test <- xgb.DMatrix(data = data_test_x, label = data_test_y)
+
+watchlist = list(train = xgb_train, test = xgb_test)
+
+safe_xgb <- xgb.train(data = xgb_train,
+                      max.depth = 3,
+                      watchlist = watchlist,
+                      nrounds = 100)
+
+##from testing different numbers of rounds found that min occured at 19 any more and just repeated similar mins around 0.4279 signs of over fitting
+final_safe_xgb <- xgb.train(data = xgb_train,
+                      max.depth = 3,
+                      watchlist = watchlist,
+                      nrounds = 19,
+                      ##doesn't display the RMSE anymore
+                      verbose = 0) 
+
+predict_xgb <- predict(final_safe_xgb, xgb_test) %>%
+  as.data.frame()
+
+outcomes <- bind_cols(data_test_y, predict_xgb)
+names(outcomes) <- c('actual', 'expected_prob')
+outcomes <- outcomes %>%
+  mutate(expected_outcome = case_when(expected_prob >= 0.5 ~ 1,
+                                      TRUE ~ 0))
+sum(outcomes$actual == outcomes$expected_outcome) / nrow(outcomes) ##model accuracy is 68.66%
+
+##feature importance
+xgb.importance(feature_names = colnames(xgb_train),
+               model = final_safe_xgb)
+```
+
+
+Based on the accuracy going to go with the Random Forest. Both Random Forest and xgBoost are the top two and aren't interpretable (black Box) so going with the higher accuracy of the two.
+
+```{r}
+##adding probabilities to the modeling data to make results data
+rf_probs <- round(predict(safe_rf, model_data), 4) %>%
+  as.data.frame()
+
+##changing the column names as default was nothing
+colnames(rf_probs) <- c('Expected')
+##adding to model_data so have variables and probability
+results <- bind_cols(model_data, rf_probs) %>%
+  ##reorders the columns so have safe, probability then the variables
+  select(safe, Expected, everything())
+
+write_csv(results, 'SMT_Challenge_Results.csv')
+```
+
+
+Creating own imporance plot using ggplot2
+```{r}
+##feature importance as data frame to combine with later
+rf_importance <- importance(safe_rf) %>%
+  as.data.frame()
+
+##isolating explanatory variables into single data frame to use for getting variable names
+explan_var <- model_data %>%
+  select(-safe)
+
+##combining variable name and importance
+rf_viz_importance <- data.frame(
+  Variable = colnames(explan_var)) %>%
+  mutate(Importance = rf_importance$`%IncMSE`) %>%
+  ##arranging by importance highest to lowest
+  arrange(desc(Importance)) %>%
+  ##changing variable names for visualization
+  mutate(variable_cleaned = case_when(Variable == 'speed_percentile_player_runner' ~ 'Baserunner Sprint Speed',
+                                      Variable == 'speed_percentile_player_thrower' ~ 'Fielder Sprint Speed',
+                                      Variable == 'throw_speed_percentile_thrower' ~ 'Throw Speed',
+                                      Variable == 'dist_next_base_at_deflect_thrower' ~ 'Fielder Distance to Base at Deflection',
+                                      Variable == 'dist_next_base_at_deflect_runner' ~ 'Baserunner Distance to Base at Deflection',
+                                      Variable == 'max_ball_dist_thrower' ~ 'Max Distance between Thrower and Ball',
+                                      .default = Variable),
+         importance_pct = Importance / sum(Importance, na.rm = TRUE))
+```
+
+```{r}
+ggplot(rf_viz_importance, aes(x = importance_pct, y = reorder(variable_cleaned, importance_pct))) +
+  geom_col(show.legend = FALSE, color = 'midnightblue', fill = 'orange2') + ##had to do some syracuse colors
+  ##scales x labs to 100%
+  scale_x_continuous(labels = scales::percent) +
+  ##labels
+  labs(title = 'Random Forest Feature Importance',
+       x = 'Accuracy Gained',
+       y = '',
+       caption = 'Data from SMT') +
+  ##theme and centering title
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme_excel_new()
+
+ggsave('RFImportancePlot.png')
+```
+
+
+```{r}
+##creating data frame for model accuracy
+model_accuracy <- data.frame(
+  model = c('Logistic', 'Naive Bayes', 'Decision Tree', 'Random Forest', 'xgBoost'),
+  accuracy = c(.7083, .6716, .6866, .7239, .6866)) %>%
+  arrange(desc(accuracy))
+
+##making fancy table for model accuracy using gt
+model_accuracy %>%
+  gt() %>%
+  ##model title
+  tab_header(title = 'Model Accuracy') %>%
+  tab_footnote(footnote = 'Data from SMT') %>%
+  ##changing column titles
+  cols_label(model = 'Model',
+             accuracy = 'Accuracy') %>%
+  ##formating the accuracy as a percent with 2 decimal places
+  fmt_percent(columns = accuracy,
+              decimals = 2) %>%
+  ##adding theme
+  gt_theme_excel() %>%
+  ##center alignment for columns
+  cols_align('center') %>%
+ gtsave(filename = 'ModelAccuracy.png')
+```

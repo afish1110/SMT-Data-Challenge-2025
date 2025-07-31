@@ -1,0 +1,1269 @@
+---
+title: "SMT Data Wrangling"
+author: "Andrew Fish"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Packages
+```{r libraries}
+##data manipulation and cleaning
+library(arrow)
+library(tidyverse)
+
+##trig
+library(pracma)
+
+##read and write csv
+library(readr)
+
+##animation
+library(sportyR)
+library(gifski)
+library(gganimate)
+
+##visualizations
+library(ggplot2)
+library(ggpubr)
+library(gt)
+library(gtExtras)
+library(webshot2)
+```
+
+```{r starter code}
+##Starter Code pulled using the source command - not sure who wrote it most likely Billy
+source('SMT_Data_Starter_2025.R')
+```
+
+Adding a unique identifier for game_str and play_id that combines the two
+
+```{r new game key}
+##mutates game_events, ball_pos, player_pos
+game_events <- game_events %>%
+  mutate(game_str_play_id = paste(game_str, play_id, sep = '_'))
+
+ball_pos <- ball_pos %>%
+  mutate(game_str_play_id = paste(game_str, play_id, sep = '_'))
+
+player_pos <- player_pos %>%
+  ##position players, batter, and baserunners
+  filter(player_position %in% c(1:12)) %>%
+  mutate(game_str_play_id = paste(game_str, play_id, sep = '_'))
+
+game_info <- game_info %>%
+  mutate(game_str_play_id = paste(game_str, play_per_game, sep = '_'))
+```
+
+Remaking the at bat column to allow the outs code to run
+
+```{r}
+##code given to me from Billy Fryer. Fred Danese, and Foster Nicholas helped to code
+#Remake at-bat column
+game_info <- game_info %>%
+  select(-at_bat) %>%
+  filter(!is.na(batter)) %>%
+  collect()
+  
+at_bat = c()
+for (row in 1:nrow(game_info)) {
+  if (row == 1) {
+    at_bat <- c(at_bat, 1)
+  } else if (game_info$game_str[row] != game_info$game_str[row-1]) {
+    at_bat <- c(at_bat, 1) 
+  } else if (game_info$batter[row] == game_info$batter[row-1]) {
+    at_bat <- c(at_bat, at_bat[row-1])
+  } else {
+    at_bat <- c(at_bat, at_bat[row-1] + 1)
+  }
+}
+game_info$at_bat <-at_bat
+
+# Calculate Inning
+
+inning <- c()
+for (row in 1:nrow(game_info)) {
+  # 
+  if (is.na(game_info$play_per_game[row])) {
+    inning <- c(inning, inning[row-1])
+  } else if (game_info$play_per_game[row] == 1) {
+    inning <- c(inning, 1)
+  } else if (game_info$game_str[row] == game_info$game_str[row-1]) {
+    inning <- c(inning, 1)
+  } else if (game_info$top_bottom_inning[row] == game_info$top_bottom_inning[row-1]) {
+    inning <- c(inning, inning[row-1])
+  } else if (game_info$top_bottom_inning[row] == 'top') {
+    inning <- c(inning, inning[row-1] + 1)
+  } else {
+    inning <- c(inning, inning[row-1])
+  }
+}
+
+game_info$inning <- inning
+```
+
+
+calculating outs
+
+```{r}
+##code taken from Atul Venkatesh, Levon Sarian, and Ishan Kinikar (competed in the 2024 SMT Data Challenge)
+##for this project don't need the final version of it. Seems like gi_test has the out data needed so will use that as game_info
+##don't need 'empty' in the baserunner columns so will change that back to NA
+#Outs metric
+gi_test <- game_info %>%
+  group_by(game_str, inning, top_bottom_inning) %>%
+  mutate(out = ifelse(row_number() ==n(), 1, 0)) %>%
+  ungroup()
+
+gi_test <- gi_test %>%
+  group_by(game_str, inning, top_bottom_inning) %>%
+  mutate(last_pitch_in_inning = ifelse(row_number() ==n(), 1, 0)) %>%
+  ungroup()
+
+# Next if the base runners stay the same then that is an out
+# Create some helper variables - This shows the lead play - What are the base runners for the next at bat?
+gi_test <- gi_test %>%
+  group_by(game_str, inning, top_bottom_inning) %>%
+  mutate(next_first_baserunner = lead(first_baserunner)) %>%
+  mutate(next_second_baserunner = lead(second_baserunner)) %>%
+  mutate(next_third_baserunner = lead(third_baserunner)) %>%
+  ungroup()
+# This is to show the last pitch of an at bat. This is the pitch where the out or not out will occur
+gi_test <- gi_test %>%
+  group_by(game_str, inning, top_bottom_inning, at_bat) %>%
+  mutate(last_pitch = ifelse(row_number() == n(), 1, 0)) %>%
+  ungroup()
+# Filling up the leads based on the last pitch - This is because base runners might change from at-bat to at-bat
+#gi_test <- gi_test %>%
+# group_by(game_str, inning, at_bat) %>%
+#mutate(
+# next_first_baserunner = last(next_first_baserunner, order_by = row_number()),
+#next_second_baserunner = last(next_second_baserunner, order_by = row_number()),
+#next_third_baserunner = last(next_third_baserunner, order_by = row_number())
+#) %>%
+#ungroup()
+# Changing NAs to "empty"
+gi_test$first_baserunner[is.na(gi_test$first_baserunner)] <- "empty"
+gi_test$second_baserunner[is.na(gi_test$second_baserunner)] <- "empty"
+gi_test$third_baserunner[is.na(gi_test$third_baserunner)] <- "empty"
+gi_test$next_first_baserunner[is.na(gi_test$next_first_baserunner)] <- "empty"
+gi_test$next_second_baserunner[is.na(gi_test$next_second_baserunner)] <- "empty"
+gi_test$next_third_baserunner[is.na(gi_test$next_third_baserunner)] <- "empty"
+# If the baserunners from one at-bat to another at-bat stay the same, then we know an out occurred
+gi_test <- gi_test %>%
+  mutate(
+    out = ifelse(
+      first_baserunner == next_first_baserunner &
+        second_baserunner == next_second_baserunner &
+        third_baserunner == next_third_baserunner,
+      1, 
+      out
+    )
+  )
+
+# Making it so only the last pitch matters for the out
+gi_test$out <- ifelse(gi_test$last_pitch == 0, NA, gi_test$out)
+
+#Outs counter
+gi_test <- gi_test %>%
+  group_by(game_str, inning) %>%
+  mutate(temp_out = ifelse(is.na(out), 0, out),  # Temporary column
+         outs_in_inning = cumsum(temp_out)) %>%
+  select(-temp_out) %>%  # Remove the temporary column
+  ungroup()
+
+# If the batter does not show up as a base runner on the next at bat, then they got out (unless they hit a home run)
+
+gi_test <- gi_test %>%
+  mutate(out = ifelse(batter != next_first_baserunner & batter != next_second_baserunner & batter != next_third_baserunner, 1, out))
+
+#Simple double play - The scenario where it is a man on first and the next at bat there is no one on - This will either be a double play or a home run. We will correct for home run later
+gi_test <- gi_test %>%
+  mutate(out = ifelse(last_pitch_in_inning != 1 & first_baserunner != "empty" & second_baserunner == "empty" & third_baserunner == "empty" & next_first_baserunner == "empty" & next_second_baserunner == "empty" & next_third_baserunner == "empty", 2,out))
+
+#simple fielder's choice - Man on first, no one on second or third. The next at-bat, the player at the previous at-bat replaces the player at first base. 99% of cases, this is a fielder's choice
+gi_test <- gi_test %>%
+  mutate(out = ifelse(last_pitch_in_inning != 1 & first_baserunner != "empty" & second_baserunner == "empty" & third_baserunner == "empty" & next_first_baserunner != "empty" & next_first_baserunner != first_baserunner & next_second_baserunner == "empty" & next_third_baserunner == "empty", 1,out))
+
+#Complex double play - Man on first and second - Runner on second advances to third, runner on first and second are empty
+gi_test <- gi_test %>%
+  mutate(out = ifelse(last_pitch_in_inning != 1 & first_baserunner != "empty" & second_baserunner != "empty" & third_baserunner == "empty" & next_first_baserunner == "empty" & next_second_baserunner == "empty" & next_third_baserunner == second_baserunner, 2,out))
+
+
+#Inning ending double play
+gi_test <- gi_test %>%
+  mutate(out = ifelse(lag(outs_in_inning) == 1 & last_pitch_in_inning == 1, 2, out))
+gi_test$out <- ifelse(gi_test$last_pitch == 0, NA, gi_test$out)
+
+#Inning ending triple play
+gi_test <- gi_test %>%
+  mutate(out = ifelse(lag(outs_in_inning) == 0 & last_pitch_in_inning == 1, 3, out))
+gi_test$out <- ifelse(gi_test$last_pitch == 0, NA, gi_test$out)
+#outcounter again with the inning ending double play taken into account
+gi_test <- gi_test %>%
+  group_by(game_str, inning, top_bottom_inning) %>%
+  mutate(temp_out = ifelse(is.na(out), 0, out),  # Temporary column
+         outs_in_inning = cumsum(temp_out)) %>%
+  select(-temp_out) %>%  # Remove the temporary column
+  ungroup()
+#Complex double play - Runner on first and second, next at-bat, runners are empty - This could also be a triple play but we will figure that out later. 
+gi_test <- gi_test %>%
+  mutate(out = ifelse(last_pitch_in_inning != 1 & last_pitch == 1 & first_baserunner != "empty" & second_baserunner != "empty" & third_baserunner == "empty" & next_first_baserunner == "empty" & next_second_baserunner == "empty" & next_third_baserunner == "empty", 2,out))
+
+# Complex double play - Runners on first and third, next at-bat, runners are empty
+gi_test <- gi_test %>%
+  mutate(out = ifelse(last_pitch_in_inning != 1 & last_pitch == 1 & first_baserunner != "empty" & second_baserunner == "empty" & third_baserunner != "empty" & next_first_baserunner == "empty" & next_second_baserunner == "empty" & next_third_baserunner == "empty", 2,out))
+
+# Complex double play - Runners on first, second, ad third, next at bat, the guy on second moves to third
+gi_test <- gi_test %>%
+  mutate(out = ifelse(last_pitch_in_inning != 1 & last_pitch == 1 & first_baserunner != "empty" & second_baserunner != "empty" & third_baserunner != "empty" & next_first_baserunner == "empty" & next_second_baserunner == "empty" & next_third_baserunner == second_baserunner, 2,out))
+
+# Add in home runs
+game_events_hr <- game_events %>%
+  filter(event_code == 11) %>%
+  collect()
+home_runs <- select(game_events_hr, game_str, play_per_game, event_code)
+gi_test <- left_join(gi_test, home_runs, by =c("game_str", "play_per_game"))
+
+gi_test <- gi_test %>%
+  mutate(event_code = ifelse(event_code == 11, 1, 0)) %>%
+  rename(is_homerun = event_code)
+gi_test$is_homerun[is.na(gi_test$is_homerun)] <- 0
+
+gi_test <- gi_test %>%
+  mutate(out = ifelse(is_homerun == 1, 0, out))
+```
+
+```{r}
+##using gi_test as the base game_info and changing empty back to NA
+game_info <- gi_test %>%
+  mutate(first_baserunner = case_when(first_baserunner == 'empty' ~ NA,
+                                      .default = first_baserunner),
+         second_baserunner = case_when(second_baserunner == 'empty' ~ NA,
+                                       .default = second_baserunner),
+         third_baserunner = case_when(third_baserunner == 'empty' ~ NA,
+                                      .default = third_baserunner),
+         next_first_baserunner = case_when(next_first_baserunner == 'empty' ~ NA,
+                                           .default = next_first_baserunner),
+         next_second_baserunner = case_when(next_second_baserunner == 'empty' ~ NA,
+                                            .default = next_second_baserunner),
+         next_third_baserunner = case_when(next_third_baserunner == 'empty' ~ NA,
+                                           .default = next_third_baserunner))
+```
+
+
+
+Filtering the game_events, player_pos, ball_pos, game_info data to contain plays that have a deflection (event code of 9)
+
+```{r}
+#Finding exact lines of the dataframe with a 9 for deflection
+partial_deflection_plays <- game_events %>%
+  ##used unique() to see the different position codes on the deflections
+  ##added the player positions filter to remove deflections where the ball would be dead ie hit batter or runners interference
+  ##also removed deflections with no player associated with it (255: ball event with no player)
+  filter(event_code == 9 & player_position %in% c(1:9, 16)) %>% collect()
+
+#Getting full plays including a 9 for deflection
+deflection_plays <- game_events %>%
+  filter(game_str_play_id %in% partial_deflection_plays$game_str_play_id) %>%
+  collect()
+```
+
+```{r}
+##grabbing all lines of ball_pos and player_pos that correspond to event_code 9.
+ball_pos_deflect <- ball_pos %>%
+  filter(game_str_play_id %in% partial_deflection_plays$game_str_play_id) %>%
+  collect()
+
+##all game_events for each deflection play
+player_pos_deflect <- player_pos %>%
+  filter(game_str_play_id %in% partial_deflection_plays$game_str_play_id) %>%
+  collect()
+
+game_info_deflect <- game_info %>%
+  filter(game_str_play_id %in% partial_deflection_plays$game_str_play_id) %>%
+  collect()
+```
+
+
+The following chunks are functions for distance using ball and player tracking data to be used later
+
+```{r ball distance}
+##function to calculate ball speed between any two given events. This should
+ball_distance <- function(bx1, by1, bz1, bx2, by2, bz2){
+  ##all positional and time arguments are character type in the df so have to change to numeric/integer
+  bx1 <- as.numeric(bx1)
+  by1 <- as.numeric(by1)
+  bz1 <- as.numeric(bz1)
+  bx2 <- as.numeric(bx2)
+  by2 <- as.numeric(by2)
+  bz2 <- as.numeric(bz2)
+  
+  ##3D distance formula
+  distance <- round(sqrt(((bx2 - bx1)^2) + ((by2 - by1)^2) + ((bz2 - bz1)^2)), 2)
+  return(distance)
+}
+```
+
+
+```{r player distance}
+##calculating distance traveled by player at any two given points
+player_distance <- function(px1, py1, px2, py2){
+  ##coordinates came in as character so converting type to numeric
+  px1 <- as.numeric(px1)
+  py1 <- as.numeric(py1)
+  px2 <- as.numeric(px2)
+  py2 <- as.numeric(py2)
+  
+  ##distance formula
+  distance <- round(sqrt(((px2 - px1)^2) + ((py2 - py1)^2)), 2)
+  return(distance)
+}
+```
+
+Finding where the 1st, 2nd, and 3rd base are in the data's coordinates using simple algebra and geometry
+
+```{r base coordinates}
+##finding the coordinates of the bases using trig functions
+##we know since it is a square are triangles have two 90 ft sides with two 45 degree angles so only need to calculate 1 height and width since will be same on all triangles
+
+width <- 90 * cosd(45)
+height <- 90 * sind(45)
+
+##coordinates for each base in terms of x and y using separate variables instead of vectors
+first_base_x <- width
+first_base_y <- height
+second_base_x <- 0
+second_base_y <- 2 * height
+third_base_x <- -1 * width
+third_base_y <- height
+##using home plate as (0,0) which is the points coordinates
+home_plate_x <- 0
+home_plate_y <- 0
+```
+
+The following chunks are mutating the player position df to add distances to the bases both straightline and via basepath. Reletive speed is added at this time as well
+
+```{r}
+##first set of mutations
+##adding a position in words so we know which code is what position
+##adding columns that have player distance to each base (these are straight line distances aka shortest distance between player and base)
+
+##second set of mutations
+##adding different distance for players that are batter/runner that follows basepaths
+##batters boxes are 4x6 with 3 ft in front and 3 feet behind home plate boxes are 6 inches from edge of home plate
+##going forward with basic measurements only caring if in between certain bases
+
+player_pos_deflect <- player_pos_deflect %>%
+  group_by(game_str, play_id) %>%
+  mutate(##used the code in discord that Billy and Jordyn Geller made for play-by-play description
+        player_position_title = recode(as.character(player_position),
+         '1' = 'pitcher',
+         '2' = 'catcher',
+         '3' = 'first_base',
+         '4' = 'second_base',
+         '5' = 'third_base',
+         '6' = 'shortstop',
+         '7' = 'left_field',
+         '8' = 'center_field',
+         '9' = 'right_field',
+         '10' = 'batter',
+         '11' = 'first_baserunner',
+         '12' = 'second_baserunner'),
+        field_x = as.numeric(field_x), ##changing to numeric type will be needed later in mutation
+        field_y = as.numeric(field_y),
+        distance_to_first = player_distance(field_x, field_y, first_base_x, first_base_y),
+        distance_to_second = player_distance(field_x, field_y, second_base_x, second_base_y),
+        distance_to_third = player_distance(field_x, field_y, third_base_x, third_base_y),
+        distance_to_home = player_distance(field_x, field_y, home_plate_x, home_plate_y),
+        ##only want forward distances so for first base we don't care about the runners that are on the other bases
+        br_dist_first = case_when(player_position == 10 ~ distance_to_first),
+         
+         ##following mutated only on players that will be running bases
+        br_dist_second = case_when((((((field_x >= 0) & (field_x <= first_base_x)) & ##between first and second
+                                   ((field_y >= first_base_y) & (field_y <= second_base_y)))) &
+                                     ##similar to br_dist_first don't want runners that start on second or third
+                                     player_position %in% c(10, 11)) ~ distance_to_second,
+                                  
+                                  (((((field_x >= 0) & (field_x <= first_base_x)) & ##between home and first
+                                   ((field_y >= -3.5) & (field_y <= first_base_y)))) &
+                                     player_position %in% c(10, 11)) ~ 90 + distance_to_first,
+                                  player_position == 10 ~ 90 + distance_to_first),
+        
+        br_dist_third = case_when((((((field_x >= third_base_x) & (field_x <= 0)) & ##between second and third
+                                   ((field_y >= third_base_y) & (field_y <= second_base_y)))) &
+                                     player_position %in% c(10, 11, 12)) ~ distance_to_third,
+                                   (((((field_x >= 0) & (field_x <= first_base_x)) & ##between first and second
+                                   ((field_y >= first_base_y) & (field_y <= second_base_y)))) &
+                                     player_position %in% c(10, 11, 12)) ~ 90 + distance_to_second,
+                                   (((((field_x >= 0) & (field_x <= first_base_x)) & ##between home and first
+                                   ((field_y >= -3.5) & (field_y <= first_base_y)))) &
+                                     player_position %in% c(10, 11, 12)) ~ 180 + distance_to_first,
+                                   player_position == 10 ~ 180 + distance_to_first),
+
+       br_dist_home = case_when((((((field_x >= third_base_x) & (field_x <= 0)) & ##between third and home
+                                   ((field_y >= -3.5) & (field_y <= third_base_y)))) &
+                                     player_position %in% c(11, 12)) ~ distance_to_home,
+
+                                (((((field_x >= third_base_x) & (field_x <= 0)) & ##between second and third
+                                   ((field_y >= third_base_y) & (field_y <= second_base_y)))) &
+                                     player_position %in% c(11, 12)) ~ 90 + distance_to_third,
+
+                                 (((((field_x >= 0) & (field_x <= first_base_x)) & ##between first and second
+                                   ((field_y >= first_base_y) & (field_y <= second_base_y)))) &
+                                     player_position %in% c(11, 12)) ~ 180 + distance_to_second,
+
+                                 (((((field_x >= 0) & (field_x <= first_base_x)) & ##between home and first
+                                   ((field_y >= -3.5) & (field_y <= first_base_y)))) &
+                                     player_position %in% c(11, 12)) ~ 270 + distance_to_first,
+                                  
+                                ##for batter to home want the entire basepath position doesn't matter it is just distance to first plus the 270
+                                player_position == 10 ~ 270 + distance_to_first),
+        
+      ##'want distance to next base for any player whether fielder or baserunner 2 bases ahead
+      ##'fielders will be straightline and baserunners are via the basepaths
+      ##'will use the mutated distances above to help calculate distances
+      ##'want to have fielder distances so it is to the lead runners next base
+      dist_next_base = case_when(player_position == 10 ~ br_dist_second,
+                                 player_position == 11 ~ br_dist_third,
+                                 player_position == 12 ~ br_dist_home)) %>%
+  ungroup()
+
+##lookup data frame for finding lead runner for each play
+lead_runner_lookup <- player_pos_deflect %>%
+  group_by(game_str, play_id) %>%
+  select(game_str, play_id, player_position) %>%
+  filter(player_position %in% c(10:12)) %>%
+  summarize(lead_runner = max(player_position))
+
+
+player_pos_deflect <- player_pos_deflect %>%
+  ##joins lead runner info with player tracking info
+  left_join(., lead_runner_lookup, by = join_by('game_str', 'play_id')) %>%
+  ##continues where left off in mutate dist_next_base with fielder distances using lead runner and moving 2 bases ahead
+  mutate(dist_next_base = case_when((player_position %in% c(1:9) &
+                                    lead_runner == 10) ~ distance_to_second,
+                                 (player_position %in% c(1:9) &
+                                    lead_runner == 11) ~ distance_to_third,
+                                 (player_position %in% c(1:9) &
+                                    lead_runner == 12) ~ distance_to_home,
+                                 .default = dist_next_base))
+```
+
+
+The following chunks will put the game_info (player position ids) with the player position data. By rearranging the game_info table then joining with player positional data
+
+```{r}
+##each section creates a data frame with play info, position, and player_id. Coded by calling to game_info_deflect data frame
+pitcher_player_id <- data.frame(
+  ##the following 3 are play and game identifiers
+  game_str = game_info_deflect$game_str,
+  play_id = as.character(game_info_deflect$play_per_game),
+  game_str_play_id = game_info_deflect$game_str_play_id,
+  ##written out position to match up with player position data
+  position = 'pitcher',
+  ##player ID from game_info
+  player_id = game_info_deflect$pitcher,
+  out = game_info_deflect$out,
+  outs_inning = game_info_deflect$outs_in_inning
+)
+
+catcher_player_id <- data.frame(
+  game_str = game_info_deflect$game_str,
+  play_id = as.character(game_info_deflect$play_per_game),
+  game_str_play_id = game_info_deflect$game_str_play_id,
+  position = 'catcher',
+  player_id = game_info_deflect$catcher,
+  out = game_info_deflect$out,
+  outs_inning = game_info_deflect$outs_in_inning
+)
+
+first_base_player_id <- data.frame(
+  game_str = game_info_deflect$game_str,
+  play_id = as.character(game_info_deflect$play_per_game),
+  game_str_play_id = game_info_deflect$game_str_play_id,
+  position = 'first_base',
+  player_id = game_info_deflect$first_base,
+  out = game_info_deflect$out,
+  outs_inning = game_info_deflect$outs_in_inning
+)
+
+second_base_player_id <- data.frame(
+  game_str = game_info_deflect$game_str,
+  play_id = as.character(game_info_deflect$play_per_game),
+  game_str_play_id = game_info_deflect$game_str_play_id,
+  position = 'second_base',
+  player_id = game_info_deflect$second_base,
+  out = game_info_deflect$out,
+  outs_inning = game_info_deflect$outs_in_inning
+)
+
+third_base_player_id <- data.frame(
+  game_str = game_info_deflect$game_str,
+  play_id = as.character(game_info_deflect$play_per_game),
+  game_str_play_id = game_info_deflect$game_str_play_id,
+  position = 'third_base',
+  player_id = game_info_deflect$third_base,
+  out = game_info_deflect$out,
+  outs_inning = game_info_deflect$outs_in_inning
+)
+
+shortstop_player_id <- data.frame(
+  game_str = game_info_deflect$game_str,
+  play_id = as.character(game_info_deflect$play_per_game),
+  game_str_play_id = game_info_deflect$game_str_play_id,
+  position = 'shortstop',
+  player_id = game_info_deflect$shortstop,
+  out = game_info_deflect$out,
+  outs_inning = game_info_deflect$outs_in_inning
+)
+
+left_field_player_id <- data.frame(
+  game_str = game_info_deflect$game_str,
+  play_id = as.character(game_info_deflect$play_per_game),
+  game_str_play_id = game_info_deflect$game_str_play_id,
+  position = 'left_field',
+  player_id = game_info_deflect$left_field,
+  out = game_info_deflect$out,
+  outs_inning = game_info_deflect$outs_in_inning
+)
+
+center_field_player_id <- data.frame(
+  game_str = game_info_deflect$game_str,
+  play_id = as.character(game_info_deflect$play_per_game),
+  game_str_play_id = game_info_deflect$game_str_play_id,
+  position = 'center_field',
+  player_id = game_info_deflect$center_field,
+  out = game_info_deflect$out,
+  outs_inning = game_info_deflect$outs_in_inning
+)
+
+right_field_player_id <- data.frame(
+  game_str = game_info_deflect$game_str,
+  play_id = as.character(game_info_deflect$play_per_game),
+  game_str_play_id = game_info_deflect$game_str_play_id,
+  position = 'right_field',
+  player_id = game_info_deflect$right_field,
+  out = game_info_deflect$out,
+  outs_inning = game_info_deflect$outs_in_inning
+)
+
+batter_player_id <- data.frame(
+  game_str = game_info_deflect$game_str,
+  play_id = as.character(game_info_deflect$play_per_game),
+  game_str_play_id = game_info_deflect$game_str_play_id,
+  position = 'batter',
+  player_id = game_info_deflect$batter,
+  out = game_info_deflect$out,
+  outs_inning = game_info_deflect$outs_in_inning
+)
+
+first_baserunner_player_id <- data.frame(
+  game_str = game_info_deflect$game_str,
+  play_id = as.character(game_info_deflect$play_per_game),
+  game_str_play_id = game_info_deflect$game_str_play_id,
+  position = 'first_baserunner',
+  player_id = game_info_deflect$first_baserunner
+)
+
+second_baserunner_player_id <- data.frame(
+  game_str = game_info_deflect$game_str,
+  play_id = as.character(game_info_deflect$play_per_game),
+  game_str_play_id = game_info_deflect$game_str_play_id,
+  position = 'second_baserunner',
+  player_id = game_info_deflect$second_baserunner,
+  out = game_info_deflect$out,
+  outs_inning = game_info_deflect$outs_in_inning
+)
+
+##joins all of the positions back into one data frame
+helper_game_info <- bind_rows(pitcher_player_id, catcher_player_id, first_base_player_id, second_base_player_id, third_base_player_id, shortstop_player_id, left_field_player_id, center_field_player_id, right_field_player_id, batter_player_id, first_baserunner_player_id, second_baserunner_player_id)
+```
+
+```{r}
+##joining player_id data with positional data. Using many-to-many relationship since multiple data points per player per play.
+##left join removes an NAs that have no x,y position coordinates. Still have to deal with other NAs plan is to give position based averages for speed and arm
+player_pos_deflect <- left_join(player_pos_deflect, helper_game_info, by = join_by('game_str', 'play_id',
+                                                       'game_str_play_id', 'player_position_title' == 'position'),
+                                relationship = 'many-to-many')
+```
+
+
+The following chunk of code mutates the ball position data to add distances to bases just like the player position data. This one needs less since ball will attempt to take shortest straightline distance to base. Also relative speed is added at this time
+
+```{r}
+##adding columns that have ball distance to each base
+##using 4 as ball height at the bag as a generic catch height for applying a tag likely ball will be lower than that
+##added a relative speed at the end to be used to calculate average speed for each throw so can then filter game_str_play_id and timestamps
+ball_pos_deflect <- ball_pos_deflect %>%
+  mutate(distance_to_first = ball_distance(ball_position_x, ball_position_y, ball_position_z, first_base_x, first_base_y, 4),
+         distance_to_second = ball_distance(ball_position_x, ball_position_y, ball_position_z, second_base_x, second_base_y, 4),
+         distance_to_third = ball_distance(ball_position_x, ball_position_y, ball_position_z, third_base_x, third_base_y, 4),
+         distance_to_home = ball_distance(ball_position_x, ball_position_y, ball_position_z, home_plate_x, home_plate_y, 4),
+         rel_speed = ((ball_distance(lead(ball_position_x), lead(ball_position_y), lead(ball_position_z), ball_position_x, ball_position_y, ball_position_z)) / (lead(as.numeric(timestamp)) - as.numeric(timestamp)) * ((1000 * 3600) / 5280))) ##converts to mph
+```
+
+
+The following chunks of code will deal with calculating the average running and throwing speeds of the players. Player speeds will only be calculated while the ball is in play (more likely to be running full speed). Ball speeds will be taken only on the throws (3 lag 2)
+
+
+Running speed
+
+```{r}
+##looking for the lines in the df when the ball is contacted (4)
+contact <- deflection_plays %>%
+  group_by(game_str, play_id) %>%
+  filter(event_code == 4) %>%
+  select(game_str, play_id, game_str_play_id, timestamp, event_code) %>%
+  ungroup()
+
+##looking for lines that signal the end of play (5)
+end_play <- deflection_plays %>%
+  group_by(game_str, play_id) %>%
+  filter(event_code == 5) %>%
+  select(game_str, play_id, game_str_play_id, timestamp, event_code) %>%
+  ungroup()
+
+##joins the contacts and end of play
+##using inner join because want plays with both contact and end of play, this also helps deal with any NAs as they should be left out
+all_bbip <- inner_join(contact, end_play,
+                      by = c('game_str' = 'game_str', 'play_id' = 'play_id', 'game_str_play_id' = 'game_str_play_id'),
+                      suffix = c('_contact', '_end_play'))
+```
+
+
+```{r}
+player_bbip <- player_pos_deflect %>%
+  ##types not matching so changes to match as numeric
+  mutate(play_id = as.numeric(play_id)) %>%
+  ##combines player_pos_deflect and all_bbip to help fix issue with differing lengths of the dfs
+  left_join(all_bbip, by = c('game_str' = 'game_str', 'play_id' = 'play_id', 'game_str_play_id' = 'game_str_play_id')) %>%
+  ##filter for all timestamps within contact and end of play (while play is going on)
+  filter(game_str_play_id %in% all_bbip$game_str_play_id &
+         ((timestamp >= timestamp_contact) &
+         (timestamp <= timestamp_end_play)))
+```
+
+
+```{r}
+  rel_speed_run <- player_bbip %>%
+  ##changes type to allow math
+    mutate(timestamp = as.numeric(timestamp)) %>%
+  ##has correct groupings game then play then position
+  ##.drop = FALSE keeps all of the rows in the df
+    group_by(game_str, play_id, player_position, .drop = FALSE) %>%
+  ##change in distance and time will be used to calculate speed
+    mutate(d_step = sqrt((field_x - lag(field_x))^2 + (field_y - lag(field_y))^2),
+           d_time = timestamp - lag(timestamp)) %>%
+    ungroup() %>%
+  ##calculating speed in ft/sec using the changes in distance and time
+    mutate(rel_speed_run = round(1000 * d_step / d_time, 2)) %>%
+  ##sorting the df by game then play then position then timestamp
+    arrange(game_str, play_id, player_position, timestamp)
+
+
+##calculating 95th percentile of the rel_speed_run
+rel_speed_run_player <- rel_speed_run %>%
+  ##groups players by ID rel_speed_run percentiles will be attached per player
+  group_by(player_id) %>%
+  ##gives 95th percentile using the quantile function, need to remove NA values will handle them later
+  summarize(speed_percentile_player = round(quantile(rel_speed_run, probs = 0.95, na.rm = TRUE), 2),
+            n_runs = n()) %>%
+  ungroup()
+
+##value that will be used to fill in NAs for baserunners ie player_position 10-12
+br_na <- mean(rel_speed_run_player$speed_percentile_player)
+
+##this does the same as the rel_speed_player but groups by position
+##will be used for filling in NAs on the defensive side
+rel_speed_run_position <- rel_speed_run %>%
+  group_by(player_position) %>%
+  filter(player_position %in% c(1:9)) %>%
+  summarize(speed_percentile_fielder = round(quantile(rel_speed_run, probs = 0.95, na.rm = TRUE), 2),
+            n_runs = n()) %>%
+  ##sorts the df by the position number for easier lookup
+  arrange(as.numeric(player_position)) %>%
+  ungroup()
+
+##fielder NAs will be filled in by position using the 95th percentile for the position
+```
+
+
+Adding player relative speed to the positional data
+
+```{r}
+##joining the rel_speed_run with player positional data
+player_pos_speed <- player_pos_deflect %>%
+  left_join(rel_speed_run_player, by = c('player_id' = 'player_id'), relationship = 'many-to-many')
+```
+
+
+Throw speed
+
+```{r}
+##throw and catch data frames and joining them together. Will be used to help figure out throw speeds and making sure measuring during throws
+throw <- deflection_plays %>%
+  group_by(game_str, play_id) %>%
+  filter(event_code == 3) %>%
+  select(game_str, play_id, game_str_play_id, timestamp, event_code) %>%
+  ungroup()
+
+catch <- deflection_plays %>%
+  group_by(game_str, play_id) %>%
+  filter(event_code == 2) %>%
+  select(game_str, play_id, game_str_play_id, timestamp, event_code) %>%
+  ungroup()
+
+all_throw_catch <- inner_join(throw, catch,
+                      by = c('game_str' = 'game_str', 'play_id' = 'play_id', 'game_str_play_id' = 'game_str_play_id'),
+                      suffix = c('_throw', '_catch'), relationship = 'many-to-many')
+```
+
+
+Combining the player and ball data will need both of them for the throw speeds
+
+```{r}
+##for getting the throw speeds need the player ids. They are in the player_pos deflect so combining player and ball position data
+##as well adding variable that tracks fielders distance to ball
+helper_player_ball_pos <- player_pos_speed %>% left_join(ball_pos_deflect, 
+                                    ##joins by keying on these columns as they are in both dfs
+                                    by = c('game_str' = 'game_str', 'play_id' = 'play_id', 'timestamp' = 'timestamp',
+                                           'game_str_play_id' = 'game_str_play_id', 'HomeTeam' = 'HomeTeam',
+                                           'AwayTeam' = 'AwayTeam', 'Season' = 'Season', 'Day' = 'Day'),
+                                    ##instead of .x and .y columns with same name will have the corresponding addition
+                                    suffix = c('_player', '_ball')) %>%
+  mutate(player_ball_distance = ball_distance(field_x, field_y, 4, ball_position_x, ball_position_y, ball_position_z))
+```
+
+
+```{r}
+player_throw_catch <- helper_player_ball_pos %>%
+  ##types not matching so changes to match as numeric
+  mutate(play_id = as.numeric(play_id)) %>%
+  ##combines ball_pos_deflect and all_throw_catch to help fix issue with differing lengths of the dfs. Need many to many relationship as multiple throws in one play
+  left_join(all_throw_catch, by = c('game_str' = 'game_str', 'play_id' = 'play_id', 'game_str_play_id' = 'game_str_play_id'),
+            relationship = 'many-to-many') %>%
+  ##filter for all timestamps within contact and end of play (while play is going on)
+  filter(game_str_play_id %in% all_throw_catch$game_str_play_id &
+         ((timestamp >= timestamp_throw) &
+         (timestamp <= timestamp_catch)))
+```
+
+```{r}
+##throw speed by player id
+rel_speed_throw_player <- player_throw_catch %>%
+  group_by(player_id) %>%
+  summarize(throw_speed_percentile = round(quantile(rel_speed, probs = 0.95, na.rm = TRUE), 2),
+            n_throws = n()) %>%
+  ungroup()
+
+##using the mean of every player for the throw speed to fill NA values
+##looked at using individual positions like the baserunners but they were all very similar
+##as well they were similar to the mean method
+throw_na <- round(mean(rel_speed_throw_player$throw_speed_percentile), 2)
+```
+
+
+```{r}
+##joining the player and ball data with the throw speeds
+player_throw_speed <- helper_player_ball_pos %>%
+  ##only have player_id in common and need many to many relationship again
+  left_join(., rel_speed_throw_player, by = c('player_id' = 'player_id'), relationship = 'many-to-many')
+```
+
+
+Getting the distance to next base at the time of deflection
+
+```{r}
+##distance to next base at the time of the deflections baserunners is via baseline and fielders is straight distance
+dist_next_base_position_lookup <- player_throw_speed %>%
+  group_by(game_str, play_id, player_position) %>%
+  filter(game_str_play_id %in% partial_deflection_plays$game_str_play_id &
+           timestamp %in% partial_deflection_plays$timestamp) %>%
+  summarize(dist_next_base_at_deflect = dist_next_base) %>%
+  ungroup()
+
+##lookup dataframe for NA value replacing
+dist_next_base_na_lookup <- dist_next_base_position_lookup %>%
+  group_by(player_position) %>%
+  summarize(na_replacement = round(mean(dist_next_base_at_deflect, na.rm = TRUE), 2)) %>%
+  ungroup()
+```
+
+
+Calculating max distance between player and ball. Want this after deflection and before ball is picked up
+
+```{r}
+##when the ball is acquired
+pickups <- deflection_plays %>%
+  group_by(game_str, play_id) %>%
+  filter(event_code == 2) %>%
+  ungroup()
+
+##joinging when the ball is deflected and when the ball is acquired
+deflect_to_pickup <- suppressWarnings({partial_deflection_plays %>%
+    ##inner joing makes sure 
+  inner_join(., pickups,
+             by = join_by('game_str', 'play_id', 'game_str_play_id', 'at_bat', 'play_per_game'),
+             suffix = c('_deflect', '_acquire')) %>%
+    group_by(game_str, play_id) %>%
+    filter(timestamp_deflect <= timestamp_acquire)})
+
+max_player_to_ball <- suppressWarnings({deflect_to_pickup %>% ##ignores warnings many to many join
+  group_by(game_str, play_id) %>%
+    ##only takes first instance play_id wants to be many to many when not so removes duplicates
+    slice(1) %>%
+    ungroup() %>%
+    ##grabs necessary columns
+    select(game_str, play_id, game_str_play_id, timestamp_deflect, timestamp_acquire) %>%
+    ##joins with the player ball tracking data
+    right_join(., helper_player_ball_pos %>%
+                    mutate(play_id = as.numeric(play_id)),
+              by = join_by('game_str', 'play_id', 'game_str_play_id')) %>%
+    ##filters so only have the info after deflection and before ball is picked up again
+    filter(game_str_play_id %in% deflect_to_pickup$game_str_play_id &
+            ((timestamp >= timestamp_deflect)) &
+            (timestamp <= timestamp_acquire))})
+
+##don't need by player_id can just match the positions and then don't have to fill NAs
+##getting the max distance to ball during deflection play for each position
+max_position_to_ball <- max_player_to_ball %>%
+  group_by(game_str, play_id, player_position) %>%
+  summarize(max_ball_dist = round(max(player_ball_distance, na.rm = TRUE), 2)) %>%
+  ungroup()
+```
+
+
+```{r}
+##switching position code from written to numeric
+helper_game_info <- helper_game_info %>%
+  mutate(play_id = as.numeric(play_id),
+         position_code = as.integer(recode(as.character(position),
+         'pitcher' = '1',
+         'catcher' = '2',
+         'first_base' = '3',
+         'second_base' = '4',
+         'third_base' = '5',
+         'shortstop' = '6',
+         'left_field' = '7',
+         'center_field' = '8',
+         'right_field' = '9',
+         'batter' = '10',
+         'first_baserunner' = '11',
+         'second_baserunner' = '12')))
+
+##adds the recoded positions to deflection plays
+deflection_plays <- left_join(deflection_plays, helper_game_info,
+                   by = c('game_str' = 'game_str', 'play_id' = 'play_id', 'game_str_play_id' = 'game_str_play_id', 'player_position' = 'position_code'), relationship = 'many-to-many')
+```
+
+
+Starting to clean player and ball tracking data and make organized for modeling
+
+```{r}
+##having all the players who make the first throw on deflection plays
+deflection_throwers <- deflection_plays %>%
+  filter(event_code == 3) %>%
+  left_join(., partial_deflection_plays, by = join_by('game_str', 'play_id'), suffix = c('_throw', '_deflect')) %>%
+  ##checks to make sure throws happen after deflections
+  filter(timestamp_throw >= timestamp_deflect) %>%
+  group_by(game_str, play_id) %>%
+  ##if multiple throws after deflection then takes the first
+  slice(1) %>%
+  ungroup() %>%
+  mutate(made_throw = 1) %>%
+  select(game_str, play_per_game = play_per_game_throw, player_position = player_position_throw, made_throw)
+
+```
+
+
+```{r}
+##joining both throw and sprint speeds by player id
+player_speeds_lookup <- full_join(rel_speed_run_player, rel_speed_throw_player, by = join_by('player_id'))
+```
+
+
+```{r}
+##Billy helped with this section thanks for getting me unstuck back to good kermit
+##gets dummy variable for it there was an out. Only one instance per play
+out_status <- game_info %>%
+  select(game_str, at_bat, out) %>%
+  distinct() %>%
+  filter(!is.na(out)) %>%
+  group_by(game_str, at_bat) %>%
+  ##select first row if multiple available
+  slice(1) %>%
+  ungroup()
+
+
+clean_data <- game_info %>%
+  select(game_str, at_bat, play_per_game, pitcher:third_baserunner) %>%
+  pivot_longer(cols = pitcher:third_baserunner, names_to = 'position', values_to = 'player_id') %>%
+  ##changing position from words to numbers
+  mutate(position = case_when(position == 'pitcher' ~ 1, 
+                                         position == 'catcher' ~ 2,
+                                         position == 'first_base' ~ 3,
+                                         position == 'second_base' ~ 4,
+                                         position == 'third_base' ~ 5,
+                                         position == 'shortstop' ~ 6,
+                                         position == "left_field" ~ 7,
+                                         position == "center_field" ~ 8,
+                                         position == "right_field" ~ 9,
+                                         position == 'batter' ~ 10,
+                                         position == 'first_baserunner' ~ 11,
+                                         position == 'second_baserunner' ~ 12,
+                                         ##default comically large to easily spot any errors
+                                         .default = 9999999)) %>%
+  
+  ##adding play id to game info stuff
+  left_join(., partial_deflection_plays %>%
+                    select(game_str, play_id, play_per_game) %>%
+                    mutate(play_id = as.numeric(play_id)) %>%
+                    distinct(),
+            by = join_by('game_str', 'play_per_game')) %>%
+  
+  ##adding runner and throw speeds
+  left_join(., player_speeds_lookup, by = join_by('player_id')) %>%
+  
+  ##figuring out who threw the ball
+  left_join(., deflection_throwers, by = join_by('game_str', 'play_per_game', 'position' == 'player_position')) %>%
+  mutate(made_throw = case_when(is.na(made_throw) ~ 0,
+                                .default = made_throw)) %>%
+  
+  ##'inner joining to filter so we only have plays with throws. Deselecting made_throw and player_position so no extra incorrect columns
+  inner_join(., deflection_throwers %>% select(-c(made_throw, player_position)), by = join_by('game_str', 'play_per_game')) %>%
+  
+  ##'this also gives us just the thrower and batter/runners
+  filter(made_throw == 1 | (position %in% c(10:12) & !is.na(player_id))) %>%
+  select(-starts_with('n_')) %>%
+  
+  ##adding outs given the game and at bat
+  left_join(., out_status, by = join_by('game_str', 'at_bat')) %>%
+  
+  ##adding the max distance to the ball from deflection to ball acquired
+  left_join(., max_position_to_ball %>%
+                mutate(player_position = as.numeric(player_position)),
+            by = join_by('game_str', 'play_id', 'position' == 'player_position')) %>%
+  
+  ##We get a many-to-many warning but it is a one to many relationship so just ignoring this
+  left_join(., dist_next_base_position_lookup %>%
+                mutate(play_id = as.numeric(play_id),
+                       player_position = as.numeric(player_position)),
+            by = join_by('game_str', 'play_id', 'position' == 'player_position')) %>%
+  group_by(game_str, play_id) %>%
+  filter(position == min(position) | position == max(position)) %>%
+  ungroup() %>%
+  ##lets deal with NAs first will be the speeds since already coded just need to copy and paste
+  ##then the distances, distances will need to be coded like the position speeds NA lots of copy, paste, and adjust
+  mutate(safe = case_when(out %in% c(1:3) ~ 0, ##want binary relationship for logistic model if out on play we are going to assume it was lead runner. creating safe to model so want to show higher percentages they should advance and lower percentages stay
+                          out == 0 ~ 1,
+                         .default = 99999),
+         throw_speed_percentile = case_when(is.na(throw_speed_percentile) & position %in% c(1:9) ~ throw_na,
+                                            ##don't want the runners to have a listed throw speed even if they have a player_id will mess up the model
+                                            position %in% c(10:12) ~ NA,
+                                            .default = throw_speed_percentile),
+         
+         ##player speed different by position so went with that approach. filled in using average by position
+         speed_percentile_player = case_when(
+           is.na(speed_percentile_player) & position %in% c(10:12) ~ br_na,
+           is.na(speed_percentile_player) & position == 1 ~ rel_speed_run_position %>%
+                                                                     filter(player_position == 1) %>%
+                                                                     pull(speed_percentile_fielder),
+           is.na(speed_percentile_player) & position == 2 ~ rel_speed_run_position %>%
+                                                                     filter(player_position == 2) %>%
+                                                                     pull(speed_percentile_fielder),
+           is.na(speed_percentile_player) & position == 3 ~ rel_speed_run_position %>%
+                                                                     filter(player_position == 3) %>%
+                                                                     pull(speed_percentile_fielder),
+           is.na(speed_percentile_player) & position == 4 ~ rel_speed_run_position %>%
+                                                                     filter(player_position == 4) %>%
+                                                                     pull(speed_percentile_fielder),
+           is.na(speed_percentile_player) & position == 5 ~ rel_speed_run_position %>%
+                                                                     filter(player_position == 5) %>%
+                                                                     pull(speed_percentile_fielder),
+           is.na(speed_percentile_player) & position == 6 ~ rel_speed_run_position %>%
+                                                                     filter(player_position == 6) %>%
+                                                                     pull(speed_percentile_fielder),
+           is.na(speed_percentile_player) & position == 7 ~ rel_speed_run_position %>%
+                                                                     filter(player_position == 7) %>%
+                                                                     pull(speed_percentile_fielder),
+           is.na(speed_percentile_player) & position == 8 ~ rel_speed_run_position %>%
+                                                                     filter(player_position == 8) %>%
+                                                                     pull(speed_percentile_fielder),
+           is.na(speed_percentile_player) & position == 9 ~ rel_speed_run_position %>%
+                                                                     filter(player_position == 9) %>%
+                                                                     pull(speed_percentile_fielder),
+           .default = speed_percentile_player),
+         ##NAs for next base distance
+         dist_next_base_at_deflect = case_when(
+           is.na(dist_next_base_at_deflect) & position == 1 ~ dist_next_base_na_lookup %>%
+                                                                     filter(player_position == 1) %>%
+                                                                     pull(na_replacement),
+           is.na(dist_next_base_at_deflect) & position == 2 ~ dist_next_base_na_lookup %>%
+                                                                     filter(player_position == 2) %>%
+                                                                     pull(na_replacement),
+           is.na(dist_next_base_at_deflect) & position == 3 ~ dist_next_base_na_lookup %>%
+                                                                     filter(player_position == 3) %>%
+                                                                     pull(na_replacement),
+           is.na(dist_next_base_at_deflect) & position == 4 ~ dist_next_base_na_lookup %>%
+                                                                     filter(player_position == 4) %>%
+                                                                     pull(na_replacement),
+           is.na(dist_next_base_at_deflect) & position == 5 ~ dist_next_base_na_lookup %>%
+                                                                     filter(player_position == 5) %>%
+                                                                     pull(na_replacement),
+           is.na(dist_next_base_at_deflect) & position == 6 ~ dist_next_base_na_lookup %>%
+                                                                     filter(player_position == 6) %>%
+                                                                     pull(na_replacement),
+           is.na(dist_next_base_at_deflect) & position == 7 ~ dist_next_base_na_lookup %>%
+                                                                     filter(player_position == 7) %>%
+                                                                     pull(na_replacement),
+           is.na(dist_next_base_at_deflect) & position == 8 ~ dist_next_base_na_lookup %>%
+                                                                     filter(player_position == 8) %>%
+                                                                     pull(na_replacement),
+           is.na(dist_next_base_at_deflect) & position == 9 ~ dist_next_base_na_lookup %>%
+                                                                     filter(player_position == 9) %>%
+                                                                     pull(na_replacement),
+           is.na(dist_next_base_at_deflect) & position == 10 ~ dist_next_base_na_lookup %>%
+                                                                     filter(player_position == 10) %>%
+                                                                     pull(na_replacement),
+           is.na(dist_next_base_at_deflect) & position == 11 ~ dist_next_base_na_lookup %>%
+                                                                     filter(player_position == 11) %>%
+                                                                     pull(na_replacement),
+           is.na(dist_next_base_at_deflect) & position == 12 ~ dist_next_base_na_lookup %>%
+                                                                     filter(player_position == 12) %>%
+                                                                     pull(na_replacement),
+           .default = dist_next_base_at_deflect)
+         )
+```
+
+
+```{r}
+##distribution is so different within the modeling set that I am using the average from there to fill in NAs
+max_position_to_ball_na <- clean_data %>%
+  group_by(position) %>%
+  summarize(na_replacement = round(mean(max_ball_dist, na.rm = TRUE), 2)) %>%
+  ungroup()
+
+##fixing NAs for max_ball_dist same ways as other positional NAs
+clean_data <- clean_data %>%
+  mutate(max_ball_dist = case_when(is.na(max_ball_dist) & position == 1 ~ max_position_to_ball_na %>%
+                                                                     filter(position == 1) %>%
+                                                                     pull(na_replacement),
+           is.na(max_ball_dist) & position == 2 ~ max_position_to_ball_na %>%
+                                                                     filter(position == 2) %>%
+                                                                     pull(na_replacement),
+           is.na(max_ball_dist) & position == 3 ~ max_position_to_ball_na %>%
+                                                                     filter(position == 3) %>%
+                                                                     pull(na_replacement),
+           is.na(max_ball_dist) & position == 4 ~ max_position_to_ball_na %>%
+                                                                     filter(position == 4) %>%
+                                                                     pull(na_replacement),
+           is.na(max_ball_dist) & position == 5 ~ max_position_to_ball_na %>%
+                                                                     filter(position == 5) %>%
+                                                                     pull(na_replacement),
+           is.na(max_ball_dist) & position == 6 ~ max_position_to_ball_na %>%
+                                                                     filter(position == 6) %>%
+                                                                     pull(na_replacement),
+           is.na(max_ball_dist) & position == 7 ~ max_position_to_ball_na %>%
+                                                                     filter(position == 7) %>%
+                                                                     pull(na_replacement),
+           is.na(max_ball_dist) & position == 8 ~ max_position_to_ball_na %>%
+                                                                     filter(position == 8) %>%
+                                                                     pull(na_replacement),
+           is.na(max_ball_dist) & position == 9 ~ max_position_to_ball_na %>%
+                                                                     filter(position == 9) %>%
+                                                                     pull(na_replacement),
+           is.na(max_ball_dist) & position == 10 ~ max_position_to_ball_na %>%
+                                                                     filter(position == 10) %>%
+                                                                     pull(na_replacement),
+           is.na(max_ball_dist) & position == 11 ~ max_position_to_ball_na %>%
+                                                                     filter(position == 11) %>%
+                                                                     pull(na_replacement),
+           is.na(max_ball_dist) & position == 12 ~ max_position_to_ball_na %>%
+                                                                     filter(position == 12) %>%
+                                                                     pull(na_replacement),
+           .default = max_ball_dist))
+```
+
+
+```{r}
+##separating throwers and runners to have appear side by side for modeling
+model_throws <- clean_data %>%
+  filter(position %in% c(1:9))
+
+model_runs <- clean_data %>%
+  filter(position %in% c(10:12))
+
+##joining back and removing uneccesary columns
+modeling_data <- left_join(model_runs, model_throws,
+                           by = join_by('game_str', 'play_id', 'at_bat', 'play_per_game', 'safe'),
+                           suffix = c('_runner', '_thrower')) %>%
+  select(-c(starts_with('made_throw'), throw_speed_percentile_runner))
+
+write_csv(modeling_data, 'SMT_modeling_data.csv')
+```
+
+
+Visualizations using data from the cleaning process
+
+```{r}
+##making a fancy table for the player sprint speeds by position
+rel_speed_run_position %>%
+  select(player_position, speed_percentile_fielder) %>%
+  gt() %>%
+  ##table title
+  tab_header(title = 'Average Sprint Speed by Position') %>%
+  tab_footnote(footnote = 'Data from SMT') %>%
+  ##changing column titles
+  cols_label(player_position = 'Position',
+             speed_percentile_fielder = 'Average Sprint Speed') %>%
+  ##adding theme
+  gt_theme_excel() %>%
+  ##center alignment for columns
+  cols_align('center') %>%
+  gtsave(filename = 'FielderSpeedNA.png')
+```
+
+```{r}
+##fancy table for dist next base
+dist_next_base_na_lookup %>%
+  gt() %>%
+  ##table title
+  tab_header(title = 'Average Distance to Next Base by Position') %>%
+  tab_footnote(footnote = 'Data from SMT') %>%
+  ##changing column titles
+  cols_label(player_position = 'Position',
+             na_replacement = 'Averarge Distance (feet)') %>%
+  ##adding theme
+  gt_theme_excel() %>%
+  ##center alignment for columns
+  cols_align('center') %>%
+  gtsave(filename = 'FielderDistanceBaseNA.png')
+```
+
+```{r}
+##fancy table for max dist ball
+max_position_to_ball_na %>%
+  gt() %>%
+  ##table title
+  tab_header(title = 'Average Maximum Distance between Thrower and Ball') %>%
+  tab_footnote(footnote = 'Data from SMT') %>%
+  ##changing column titles
+  cols_label(position = 'Position',
+             na_replacement = 'Average Distance (feet)') %>%
+  ##adding theme
+  gt_theme_excel() %>%
+  ##center alignment for columns
+  cols_align('center') %>%
+  gtsave(filename = 'FielderDistanceBallNA.png')
+```
+
+
+the following lines are animation code taken from David Awosoga and his github
+### Animation
+
+A lot of the column types in the dataset are inferred as `string` instead of `numeric`
+in the arrow schema, such as `player_position` and `timestamp`. It's probably a good idea to fix that further upstream, but for the purposes of this example I modified those columns inside of the `animate_play` function so as to not touch `SMT_Data_Starter_2025.R`. The function is a bit slow due to the `arrow::collect` statements, so using `duckdb` in tandem with `arrow` will probably help speed things up.
+
+```{r Animations}
+#| code-summary: Animation
+animate_play <- function(game_id, play) {
+
+  # Set the specs for the gif we want to create (lower res to make it run quicker)
+  options(gganimate.dev_args = list(width = 3, height = 3, units = 'in', res = 120))
+
+  # sometimes the frames per second at different stadiums can vary (30 fps vs 50 fps)
+  # this finds an even rounding interval and calculates fps from the data explicitly
+  fps <- player_pos %>%
+    filter(game_str == game_id, play_id == play) %>%
+    collect() %>%
+    mutate(player_position = as.numeric(player_position)) %>%
+    filter(player_position < 14) %>% # only filter for players 
+    mutate(across(c(timestamp, field_x, field_y), as.numeric)) %>%
+    mutate(fps = timestamp - lag(timestamp), .by = "player_position")  %>%
+    count(fps) %>% slice_max(n) %>% pull(fps)
+
+  time_of_pitch = game_events %>%
+    filter(game_str == game_id, play_id == play, event_code == 1) %>%
+    collect() %>%
+    pull(timestamp)
+
+  # Combine data into one data frame
+  tracking_data <- player_pos %>%
+    # start with player position data
+    filter(game_str == game_id, play_id == play) %>%
+    collect() %>%
+    mutate(player_position = as.numeric(player_position)) %>%
+    filter(player_position < 14) %>%
+    mutate(type = if_else(player_position %in% c(10:13), "batter", "fielder"),
+           position_z = NA
+           ) %>%
+    rename(position_x = field_x, position_y = field_y) %>%
+    # add ball position data
+    bind_rows(
+      (ball_pos %>%
+         filter(game_str == game_id, play_id == play) %>%
+         collect() %>%
+         rename(position_x = ball_position_x,
+                position_y = ball_position_y,
+                position_z = ball_position_z) %>%
+         mutate(type = "ball", player_position = NA))
+    )  %>%
+    mutate(across(c(timestamp, position_x, position_y, position_z), as.numeric)) %>%
+    arrange(timestamp) %>%
+    # align timestamps to account for mechanical measurement error
+    mutate(timestamp_adj = plyr::round_any(timestamp, fps)) %>%
+    # trim the animation to start when the pitch is thrown
+    filter(timestamp >= time_of_pitch) %>%
+    mutate(frame_id = match(timestamp_adj, unique(timestamp_adj)))
+
+  # make field design
+  p <-  geom_baseball(league = "MiLB") +
+    geom_point(data = tracking_data %>%
+                 filter(type != "ball"),
+               aes(x = position_x, y = position_y, fill = type),
+               shape = 21, size = 3,
+               show.legend = F) +
+    geom_text(data = tracking_data %>%
+                filter(type == "fielder"),
+              aes(x = position_x, y = position_y, label = player_position),
+              color = "black", size = 2,
+              show.legend = F) +
+    geom_point(data = tracking_data %>%
+                 filter(type == "ball"),
+               aes(x = position_x, y = position_y,
+                   size = position_z),
+               fill = "white",
+               shape = 21,
+               show.legend = F) +
+    transition_time(frame_id) +
+    annotate("text", x = c(150, 0), y = c(10, 400), color = "white",
+             label = c(paste("Play:", play), paste("Game ID:", game_id))) +
+    shadow_wake(0.1, exclude_layer = c(1:16))
+
+  max_frame = max(tracking_data$frame_id)
+
+  p2 = animate(p, fps = fps, nframes = max_frame)
+
+  return(p2)
+}
+```
+
+```{r}
+##High probability safe example
+animate_play('y2_d014_TEQ_YJD', 112) ##85.02%
+
+##saving as gif for paper
+anim_save('HighProb.gif')
+```
+
+```{r}
+##low probability safe example
+animate_play('y1_d099_MRJ_YJD', 178) ##15.16%
+
+anim_save('LowProb.gif')
+```
+
